@@ -1,9 +1,13 @@
 #!/bin/bash
 
 # Shell functions used by multiple scripts.
-# This file is "source"d into others, and must be done AFTER source'ing variables.sh
-# and config.sh.
+# This file is "source"d into others, and must be done AFTER source'ing variables.sh.
 
+SUDO_OK="${SUDO_OK:-false}"
+if [[ ${SUDO_OK} == "false" && ${EUID} -eq 0 ]]; then
+	echo -e "\n${RED}${ME}: This script must NOT be run as root, do NOT use 'sudo'.${NC}\n" >&2
+	exit 1
+fi
 
 #####
 # Exit with error message and a custom notification image.
@@ -30,7 +34,7 @@ function doExit()
 	if [[ -n ${WEBUI_MESSAGE} ]]; then
 		[[ ${TYPE} = "no-image" ]] && TYPE="success"
 		"${ALLSKY_SCRIPTS}/addMessage.sh" "${TYPE}" "${WEBUI_MESSAGE}"
-		echo "Stopping Allsky: ${WEBUI_MESSAGE}"
+		echo -e "Stopping Allsky: ${WEBUI_MESSAGE}" >&2
 		OUTPUT_A_MSG="true"
 	fi
 
@@ -39,12 +43,13 @@ function doExit()
 		# even if the user has them turned off.
 		if [[ -n ${CUSTOM_MESSAGE} ]]; then
 			# Create a custom error message.
-			# If we error out before config.sh is sourced in, $FILENAME and $EXTENSION won't be
-			# set so guess at what they are.
+			# If we error out before variables.sh is sourced in,
+			# ${FILENAME} and ${EXTENSION} won't be set so guess at what they are.
 			"${ALLSKY_SCRIPTS}/generate_notification_images.sh" --directory "${ALLSKY_TMP}" \
 				"${FILENAME:-"image"}" \
 				"${COLOR}" "" "85" "" "" \
 				"" "10" "${COLOR}" "${EXTENSION:-"jpg"}" "" "${CUSTOM_MESSAGE}"
+			echo "Stopping Allsky: ${CUSTOM_MESSAGE}"
 		elif [[ ${TYPE} != "no-image" ]]; then
 			[[ ${OUTPUT_A_MSG} == "false" && ${TYPE} == "RebootNeeded" ]] && echo "Reboot needed"
 			"${ALLSKY_SCRIPTS}/copy_notification_image.sh" --expires 0 "${TYPE}" 2>&1
@@ -56,8 +61,7 @@ function doExit()
 	# Don't let the service restart us because we'll likely get the same error again.
 	[[ ${EXITCODE} -ge ${EXIT_ERROR_STOP} ]] && sudo systemctl stop allsky
 
-	# shellcheck disable=SC2086
-	exit ${EXITCODE}
+	exit "${EXITCODE}"
 }
 
 
@@ -65,8 +69,8 @@ function doExit()
 # RPi cameras can use either "raspistill" on Buster or "libcamera-still" on Bullseye
 # to actually take pictures.
 # Determine which to use.
-# On success, return 1 and the command to use.
-# On failure, return 0 and an error message.
+# On success, return 0 and the command to use.
+# On failure, return non-0 and an error message.
 function determineCommandToUse()
 {
 	local USE_doExit="${1}"			# Call doExit() on error?
@@ -103,7 +107,7 @@ function determineCommandToUse()
 			return 1
 		fi
 
-		"${CMD}" --timeout 1 --nopreview # > /dev/null 2>&1
+		"${CMD}" --timeout 1 --nopreview > /dev/null 2>&1
 		RET=$?
 	fi
 
@@ -163,11 +167,11 @@ function convertLatLong()
 			# No sign either
 			EMSG="ERROR: '${TYPE}' should contain EITHER a '+' or '-', OR a"
 			if [[ ${TYPE} == "latitude" ]]; then
-				EMSG="${EMSG} 'N' or 'S'"
+				EMSG+=" 'N' or 'S'"
 			else
-				EMSG="${EMSG} 'E' or 'W'"
+				EMSG+=" 'E' or 'W'"
 			fi
-			EMSG="${EMSG}; you entered '${LATLONG}'."
+			EMSG+="; you entered '${LATLONG}'."
 			echo -e "${EMSG}" >&2
 			return 1
 		fi
@@ -223,23 +227,21 @@ function get_sunrise_sunset()
 	local ANGLE="${1}"
 	local LATITUDE="${2}"
 	local LONGITUDE="${3}"
-	#shellcheck disable=SC2086 source-path=.
+	#shellcheck source-path=.
 	source "${ALLSKY_HOME}/variables.sh"	|| return 1
-	#shellcheck disable=SC2086,SC1091		# file doesn't exist in GitHub
-	source "${ALLSKY_CONFIG}/config.sh"		|| return 1
 
-	[[ -z ${ANGLE} ]] && ANGLE="$(settings ".angle")"
-	[[ -z ${LATITUDE} ]] && LATITUDE="$(settings ".latitude")"
-	[[ -z ${LONGITUDE} ]] && LONGITUDE="$(settings ".longitude")"
+	[[ -z ${ANGLE} ]] && ANGLE="$( settings ".angle" )"
+	[[ -z ${LATITUDE} ]] && LATITUDE="$( settings ".latitude" )"
+	[[ -z ${LONGITUDE} ]] && LONGITUDE="$( settings ".longitude" )"
 
-	LATITUDE="$(convertLatLong "${LATITUDE}" "latitude")"		|| return 2
-	LONGITUDE="$(convertLatLong "${LONGITUDE}" "longitude")"	|| return 2
+	LATITUDE="$( convertLatLong "${LATITUDE}" "latitude" )"		|| return 2
+	LONGITUDE="$( convertLatLong "${LONGITUDE}" "longitude" )"	|| return 2
 
 	echo "Daytime start    Nighttime start   Angle"
-	local X="$(sunwait list angle "0" "${LATITUDE}" "${LONGITUDE}")"
+	local X="$( sunwait list angle "0" "${LATITUDE}" "${LONGITUDE}" )"
 	# Replace comma by several spaces so the output lines up.
 	echo "${X/,/           }               0"
-	X="$(sunwait list angle "${ANGLE}" "${LATITUDE}" "${LONGITUDE}")"
+	X="$( sunwait list angle "${ANGLE}" "${LATITUDE}" "${LONGITUDE}" )"
 	echo "${X/,/           }              ${ANGLE}"
 }
 
@@ -248,47 +250,14 @@ function get_sunrise_sunset()
 # Return which Allsky Websites exist - local, remote, both, none
 function whatWebsites()
 {
-	#shellcheck disable=SC2086 source-path=.
+	#shellcheck source-path=.
 	source "${ALLSKY_HOME}/variables.sh"	|| return 1
 
 	local HAS_LOCAL="false"
 	local HAS_REMOTE="false"
 
-	# Determine local Website - this is easy.
-	[[ -f ${ALLSKY_WEBSITE_CONFIGURATION_FILE} ]] && HAS_LOCAL="true"
-
-	# Determine remote Website - this is more involved.
-	# Not only must the file exist, but there also has to be a way to upload to it.
-	if [[ -f ${ALLSKY_REMOTE_WEBSITE_CONFIGURATION_FILE} ]]; then
-		local PROTOCOL="$(get_variable "PROTOCOL" "${ALLSKY_CONFIG}/ftp-settings.sh")"
-		PROTOCOL=${PROTOCOL,,}
-		if [[ -n ${PROTOCOL} && ${PROTOCOL} != "local" ]]; then
-			local X
-			case "${PROTOCOL}" in
-				"" | local)
-					;;
-
-				ftp | ftps | sftp | scp)		# These require R
-					X="$(get_variable "REMOTE_HOST" "${ALLSKY_CONFIG}/ftp-settings.sh")" 
-					[[ -n ${X} ]] && HAS_REMOTE="true"
-					;;
-
-				s3)
-					X="$(get_variable "AWS_CLI_DIR" "${ALLSKY_CONFIG}/ftp-settings.sh")" 
-					[[ -n ${X} ]] && HAS_REMOTE="true"
-					;;
-
-				gcs)
-					X="$(get_variable "GCS_BUCKET" "${ALLSKY_CONFIG}/ftp-settings.sh")" 
-					[[ -n ${X} ]] && HAS_REMOTE="true"
-					;;
-
-				*)
-					echo "ERROR: Unknown PROTOCOL: '${PROTOCOL}'" >&2
-					;;
-			esac
-		fi
-	fi
+	[[ "$( settings ".uselocalwebsite" )" == "true" ]] && HAS_LOCAL="true"
+	[[ "$( settings ".useremotewebsite" )" == "true" ]] && HAS_REMOTE="true"
 
 	if [[ ${HAS_LOCAL} == "true" ]]; then
 		if [[ ${HAS_REMOTE} == "true" ]]; then
@@ -321,13 +290,13 @@ function checkAndGetNewerFile()
 	local GIT_FILE="${GITHUB_RAW_ROOT}/allsky/${BRANCH}/${2}"
 	local DOWNLOADED_FILE="${3}"
 	# Download the file and put in DOWNLOADED_FILE
-	X="$(curl --show-error --silent "${GIT_FILE}")"
+	X="$( curl --show-error --silent "${GIT_FILE}" )"
 	RET=$?
 	if [[ ${RET} -eq 0 && ${X} != "404: Not Found" ]]; then
 		# We really just check if the files are different.
 		echo "${X}" > "${DOWNLOADED_FILE}"
-		DOWNLOADED_CHECKSUM="$(sum "${DOWNLOADED_FILE}")"
-		MY_CHECKSUM="$(sum "${CURRENT_FILE}")"
+		DOWNLOADED_CHECKSUM="$( sum "${DOWNLOADED_FILE}" )"
+		MY_CHECKSUM="$( sum "${CURRENT_FILE}" )"
 		if [[ ${MY_CHECKSUM} == "${DOWNLOADED_CHECKSUM}" ]]; then
 			rm -f "${DOWNLOADED_FILE}"
 			return 0
@@ -372,9 +341,53 @@ function checkPixelValue()	# variable name, variable value, width_or_height, res
 
 
 #####
+# The crop rectangle needs to fit within the image and the numbers be even.
+# TODO: should there be a maximum for any number (other than the image size)?
+# Number of pixels to crop off top, right, bottom, left, plus max_resolution_x and max_resolution_y.
+function checkCropValues()
+{
+	local CROP_TOP="${1}"
+	local CROP_RIGHT="${2}"
+	local CROP_BOTTOM="${3}"
+	local CROP_LEFT="${4}"
+	local MAX_RESOLUTION_X="${5}"
+	local MAX_RESOLUTION_Y="${6}"
+
+	local ERR=""
+	if [[ ${CROP_TOP} -lt 0 || ${CROP_RIGHT} -lt 0 ||
+			${CROP_BOTTOM} -lt 0 || ${CROP_LEFT} -lt 0 ]]; then
+		ERR+="\nCrop numbers must all be positive."
+	fi
+	if [[ $((CROP_TOP % 2)) -eq 1 || $((CROP_RIGHT % 2)) -eq 1 ||
+			$((CROP_BOTTOM % 2)) -eq 1 || $((CROP_LEFT % 2)) -eq 1 ]]; then
+		ERR+="\nCrop numbers must all be even."
+	fi
+	if [[ ${CROP_TOP} -gt $((MAX_RESOLUTION_Y -2)) ]]; then
+		ERR+="\nCropping on top (${CROP_TOP}) is larger than the image height (${MAX_RESOLUTION_Y})."
+	fi
+	if [[ ${CROP_RIGHT} -gt $((MAX_RESOLUTION_X - 2)) ]]; then
+		ERR+="\nCropping on right (${CROP_RIGHT}) is larger than the image width (${MAX_RESOLUTION_X})."
+	fi
+	if [[ ${CROP_BOTTOM} -gt $((MAX_RESOLUTION_Y - 2)) ]]; then
+		ERR+="\nCropping on bottom (${CROP_BOTTOM}) is larger than the image height (${MAX_RESOLUTION_Y})."
+	fi
+	if [[ ${CROP_LEFT} -gt $((MAX_RESOLUTION_X - 2)) ]]; then
+		ERR+="\nCropping on left (${CROP_LEFT}) is larger than the image width (${MAX_RESOLUTION_X})."
+	fi
+
+	if [[ -z ${ERR} ]]; then
+		return 0
+	else
+		echo -e "${ERR}"
+		return 1
+	fi
+}
+
+#####
 # The crop rectangle needs to fit within the image, be an even number, and be greater than 0.
 # x, y, offset_x, offset_y, max_resolution_x, max_resolution_y
-function checkCropValues()
+# TODO: remove this after testing.  It's the old way of cropping.
+function checkCropValuesOLD()
 {
 	local X="${1}"
 	local Y="${2}"
@@ -401,16 +414,16 @@ function checkCropValues()
 
 	local ERR=""
 	if [[ ${CROP_TOP} -lt 0 ]]; then
-		ERR="${ERR}\nCROP rectangle goes off the top of the image by ${CROP_TOP#-} pixel(s)."
+		ERR+="\nCROP rectangle goes off the top of the image by ${CROP_TOP#-} pixel(s)."
 	fi
 	if [[ ${CROP_BOTTOM} -gt ${MAX_RESOLUTION_Y} ]]; then
-		ERR="${ERR}\nCROP rectangle goes off the bottom of the image: ${CROP_BOTTOM} is greater than image height (${MAX_RESOLUTION_Y})."
+		ERR+="\nCROP rectangle goes off the bottom of the image: ${CROP_BOTTOM} is greater than image height (${MAX_RESOLUTION_Y})."
 	fi
 	if [[ ${CROP_LEFT} -lt 0 ]]; then
-		ERR="${ERR}\nCROP rectangle goes off the left of the image: ${CROP_LEFT} is less than 0."
+		ERR+="\nCROP rectangle goes off the left of the image: ${CROP_LEFT} is less than 0."
 	fi
 	if [[ ${CROP_RIGHT} -gt ${MAX_RESOLUTION_X} ]]; then
-		ERR="${ERR}\nCROP rectangle goes off the right of the image: ${CROP_RIGHT} is greater than image width (${MAX_RESOLUTION_X})."
+		ERR+="\nCROP rectangle goes off the right of the image: ${CROP_RIGHT} is greater than image width (${MAX_RESOLUTION_X})."
 	fi
 
 	if [[ -z ${ERR} ]]; then
@@ -421,21 +434,6 @@ function checkCropValues()
 	fi
 }
 
-#####
-# Get a shell variable's value.  The variable can have optional spaces and tabs before it.
-# This function is useful when we can't "source" the file.
-function get_variable() {
-	local VARIABLE="${1}"
-	local FILE="${2}"
-	local LINE=""
-	local SEARCH_STRING="^[ 	]*${VARIABLE}="
-	if ! LINE="$( /bin/grep -E "${SEARCH_STRING}" "${FILE}" 2>/dev/null )" ; then
-		return 1
-	fi
-
-	echo "${LINE}" | sed -e "s/${SEARCH_STRING}//" -e 's/"//g'
-	return 0
-}
 
 #####
 # Simple way to get a setting that hides the details.
@@ -445,7 +443,7 @@ function settings()
 {
 	local DO_NULL="false"
 	[[ ${1} == "--null" ]] && DO_NULL="true" && shift
-	local M="${ME:-settings}"
+	local M="${ME:-${FUNCNAME[0]}}"
 	local FIELD="${1}"
 	# Arrays can't begin with period but everything else should.
 	if [[ ${FIELD:0:1} != "." && ${FIELD: -2:2} != "[]" && ${FIELD:0:3} != "if " ]]; then
@@ -454,6 +452,11 @@ function settings()
 	fi
 
 	local FILE="${2:-${SETTINGS_FILE}}"
+	if [[ ! -f ${FILE} ]]; then
+		echo "${M}: File '${FILE}' does not exist!  Cannot get '${FIELD}'." >&2
+		return 2
+	fi
+
 	if j="$( jq -r "${FIELD}" "${FILE}" )" ; then
 		[[ ${j} == "null" && ${DO_NULL} == "false" ]] && j=""
 		echo "${j}"
@@ -462,7 +465,7 @@ function settings()
 
 	echo "${M}: Unable to get json value for '${FIELD}' in '${FILE}." >&2
 	
-	return 2
+	return 3
 }
 
 
@@ -476,7 +479,7 @@ function get_links()
 {
 	local FILE="$1"
 	if [[ -z ${FILE} ]]; then
-		echo "get_links(): File not specified."
+		echo "${FUNCNAME[0]}(): File not specified."
 		return 1
 	fi
 	local DIRNAME="$( dirname "${FILE}" )"
@@ -518,17 +521,29 @@ function get_links()
 function check_settings_link()
 {
 	local FULL_FILE FILE DIRNAME SETTINGS_LINK RET MSG F E CORRECT_NAME
+	local CT="cameratype"
+	local CM="cameramodel"
+	if [[ ${1} == "--uppercase" ]]; then
+		CT="cameraType"
+		CM="cameraModel"
+		shift
+	fi
+
 	FULL_FILE="${1}"
 	if [[ -z ${FULL_FILE} ]]; then
-		echo "check_settings_link(): Settings file not specified."
+		echo "${FUNCNAME[0]}(): Settings file not specified."
 		return "${EXIT_ERROR_STOP}"
 	fi
+	if [[ ! -f ${FULL_FILE} ]]; then
+		echo "${FUNCNAME[0]}(): File '${FULL_FILE}' not found."
+		return 1
+	fi
 	if [[ -z ${CAMERA_TYPE} ]]; then
-		CAMERA_TYPE="$( settings .cameraType  "${FULL_FILE}" )"
+		CAMERA_TYPE="$( settings ".${CT}"  "${FULL_FILE}" )"
 		[[ $? -ne 0 || -z ${CAMERA_TYPE} ]] && return "${EXIT_ERROR_STOP}"
 	fi
 	if [[ -z ${CAMERA_MODEL} ]]; then
-		CAMERA_MODEL="$( settings .cameraModel  "${FULL_FILE}" )"
+		CAMERA_MODEL="$( settings ".${CM}"  "${FULL_FILE}" )"
 		[[ $? -ne 0 || -z ${CAMERA_TYPE} ]] && return "${EXIT_ERROR_STOP}"
 	fi
 
@@ -542,16 +557,16 @@ function check_settings_link()
 	RET=$?
 	if [[ ${RET} -ne 0 ]]; then
 		MSG="The settings file '${FILE}' was not linked to '${CORRECT_NAME}'"
-		[[ ${RET} -ne "${NO_LINK_}" ]] && MSG="${MSG}\nERROR: ${SETTINGS_LINK}."
+		[[ ${RET} -ne "${NO_LINK_}" ]] && MSG+="\nERROR: ${SETTINGS_LINK}."
 		echo -e "${MSG}$( fix_settings_link "${FULL_FILE}" "${FULL_CORRECT_NAME}" )"
 		return 1
 	else
 		# Make sure it's linked to the correct file.
 		if [[ ${SETTINGS_LINK} != "${FULL_CORRECT_NAME}" ]]; then
 			MSG="The settings file (${FULL_FILE}) was linked to:"
-			MSG="${MSG}\n    ${SETTINGS_LINK}"
-			MSG="${MSG}\nbut should have been linked to:"
-			MSG="${MSG}\n    ${FULL_CORRECT_NAME}"
+			MSG+="\n    ${SETTINGS_LINK}"
+			MSG+="\nbut should have been linked to:"
+			MSG+="\n    ${FULL_CORRECT_NAME}"
 			echo -e "${MSG}$( fix_settings_link "${FULL_FILE}" "${FULL_CORRECT_NAME}" )"
 			return 1
 		fi
@@ -582,29 +597,6 @@ function fix_settings_link()
 	return 0
 }
 
-function update_json_file()		# field, new value, file
-{
-	local M="${ME:-update_json_file}"
-	local FIELD="${1}"
-	if [[ ${FIELD:0:1} != "." ]]; then
-		echo "${M}: Field names must begin with period '.' (Field='${FIELD}')" >&2
-		return 1
-	fi
-
-	local NEW_VALUE="${2}"
-	local FILE="${3:-${SETTINGS_FILE}}"
-	local TEMP="/tmp/$$"
-	# Have to use "cp" instead of "mv" to keep any hard link.
-	if jq "${FIELD} = \"${NEW_VALUE}\"" "${FILE}" > "${TEMP}" ; then
-		cp "${TEMP}" "${FILE}"
-		rm "${TEMP}"
-		return 0
-	fi
-
-	echo "${M}: Unable to update json value of '${FIELD}' to '${NEW_VALUE}' in '${FILE}'." >&2
-
-	return 2
-}
 
 ####
 # Only allow one of the specified process at a time.
@@ -613,13 +605,14 @@ function one_instance()
 	local SLEEP_TIME="5s"
 	local MAX_CHECKS=3
 	local PID_FILE=""
+	local PID=""
 	local ABORTED_FILE=""
 	local ABORTED_FIELDS=""
 	local ABORTED_MSG1=""
 	local ABORTED_MSG2=""
 	local CAUSED_BY=""
 
-	OK="true"
+	local OK="true"
 	local ERRORS=""
 	while [[ $# -gt 0 ]]; do
 		ARG="${1}"
@@ -668,26 +661,26 @@ function one_instance()
 		shift
 	done
 	if [[ -z ${PID_FILE} ]]; then
-		ERRORS="${ERRORS}\nPID_FILE not specified."
+		ERRORS+="\nPID_FILE not specified."
 		OK="false"
 	fi
 	if [[ -z ${ABORTED_FILE} ]]; then
-		ERRORS="${ERRORS}\nABORTED_FILE not specified."
+		ERRORS+="\nABORTED_FILE not specified."
 		OK="false"
 	fi
 	if [[ -z ${ABORTED_FIELDS} ]]; then
-		ERRORS="${ERRORS}\nABORTED_FIELDS not specified."
+		ERRORS+="\nABORTED_FIELDS not specified."
 		OK="false"
 	fi
 	if [[ -z ${ABORTED_MSG1} ]]; then
-		ERRORS="${ERRORS}\nABORTED_MSG1 not specified."
+		ERRORS+="\nABORTED_MSG1 not specified."
 		OK="false"
 	fi
 	if [[ -z ${ABORTED_MSG2} ]]; then
-		ERRORS="${ERRORS}\nABORTED_MSG2 not specified."
+		ERRORS+="\nABORTED_MSG2 not specified."
 		OK="false"
 	fi
-	# CAUSED_BY isn't required
+	# CAUSED_BY and PID aren't required
 
 	if [[ ${OK} == "false" ]]; then
 		echo -e "${RED}${ME}: ERROR: ${ERRORS}.${NC}" >&2
@@ -695,7 +688,7 @@ function one_instance()
 	fi
 
 
-	NUM_CHECKS=0
+	local NUM_CHECKS=0
 	local INITIAL_PID
 	while  : ;
 	do
@@ -728,14 +721,14 @@ function one_instance()
 			# If it's happening often let the user know.
 			[[ ! -d ${ALLSKY_ABORTS_DIR} ]] && mkdir "${ALLSKY_ABORTS_DIR}"
 			local AF="${ALLSKY_ABORTS_DIR}/${ABORTED_FILE}"
-			echo -e "$(date)\t${ABORTED_FIELDS}" >> "${AF}"
+			echo -e "$( date )\t${ABORTED_FIELDS}" >> "${AF}"
 			NUM=$( wc -l < "${AF}" )
 			if [[ ${NUM} -eq 10 ]]; then
 				MSG="${NUM} ${ABORTED_MSG2} have been aborted waiting for others to finish."
-				[[ -n ${CAUSED_BY} ]] && MSG="${MSG}\n${CAUSED_BY}"
+				[[ -n ${CAUSED_BY} ]] && MSG+="\n${CAUSED_BY}"
 				SEVERITY="warning"
-				MSG="${MSG}\nOnce you have resolved the cause, reset the aborted counter:"
-				MSG="${MSG}\n&nbsp; &nbsp; <code>rm -f '${AF}'</code>"
+				MSG+="\nOnce you have resolved the cause, reset the aborted counter:"
+				MSG+="\n&nbsp; &nbsp; <code>rm -f '${AF}'</code>"
 				"${ALLSKY_SCRIPTS}/addMessage.sh" "${SEVERITY}" "${MSG}"
 			fi
 
@@ -759,6 +752,7 @@ function make_thumbnail()
 	local SEC="${1}"
 	local INPUT_FILE="${2}"
 	local THUMBNAIL="${3}"
+	local THUMBNAIL_SIZE_X="$( settings ".thumbnailsizex" )"
 	ffmpeg -loglevel error -ss "00:00:${SEC}" -i "${INPUT_FILE}" \
 		-filter:v scale="${THUMBNAIL_SIZE_X:-100}:-1" -frames:v 1 "${THUMBNAIL}"
 }
@@ -782,35 +776,77 @@ function reboot_needed()
 	fi
 }
 
-####
-# Read json on stdin and output each field and value separated by a tab.
-function convert_json_to_tabs()
-{
-	# Possible input formats, all with and without trailing "," and
-	# with or without leading spaces or tabs.
-	#   "field" : "value"
-	#   "field" : number
-	#   "field": "value"
-	#   "field": number
-	#   "field":"value"
-	#   "field":number
-	# Want to output two fields (field name and value), separated by tabs.
-	# First get rid of the brackets,
-	# then the optional leading spaces and tabs,
-	# then everything between the field and and its value,
-	# then ending " and/or comma.
 
-	local JSON_FILE="${1}"
-	if [[ ! -f ${JSON_FILE} ]]; then
-		echo -e "${RED}convert_json_to_tabs(): ERROR: json file '${JSON_FILE}' not found.${NC}" >&2
-		return 1
+####
+# Upload to the appropriate Websites and/or servers.
+# Everything is put relative to the root directory.
+#
+# --local-web: copy to local website
+# --remote-web: upload to remote website
+# --remote-server: upload to remote server
+function upload_all()
+{
+	local ARGS=""
+	local LOCAL_WEB="false"
+	local REMOTE_WEB="false"
+	local REMOTE_SERVER="false"
+	while [[ ${1:0:2} == "--" ]]
+	do
+		if [[ ${1} == "--local-web" ]]; then
+			LOCAL_WEB="true"
+		elif [[ ${1} == "--remote-web" ]]; then
+			REMOTE_WEB="true"
+		elif [[ ${1} == "--remote-server" ]]; then
+			REMOTE_SERVER="true"
+		else
+			ARGS="${ARGS} ${1}"
+		fi
+		shift
+	done
+	if [[ ${LOCAL_WEB} == "false" && ${REMOTE_WEB} == "false" && ${REMOTE_SERVER} == "false" ]]; then
+		LOCAL_WEB="true"
+		REMOTE_WEB="true"
+		REMOTE_SERVER="true"
 	fi
 
-	sed -e '/^{/d' -e '/^}/d' \
-		-e 's/^[\t ]*"//' \
-		-e 's/"[\t :]*[ "]/\t/' \
-		-e 's/",$//' -e 's/"$//' -e 's/,$//' \
-			"${JSON_FILE}"
+	local UPLOAD_FILE="${1}"
+	local SUBDIR="${2}"
+	local DESTINATION_NAME="${3}"
+	local FILE_TYPE="${4}"		# optional
+	local RET=0
+	local ROOT REMOTE_DIR
+	if [[ ${LOCAL_WEB} == "true" && "$( settings ".uselocalwebsite" )" == "true" ]]; then
+		#shellcheck disable=SC2086
+		"${ALLSKY_SCRIPTS}/upload.sh" ${ARGS} --local \
+			"${UPLOAD_FILE}" "${ALLSKY_WEBSITE}/${SUBDIR}" "${DESTINATION_NAME}"
+		((RET+=$?))
+	fi
+	if [[ ${REMOTE_WEB} == "true" && "$( settings ".useremotewebsite" )" == "true" ]]; then
+		ROOT="$( settings ".remotewebsiteimagedir" )"
+		if [[ -z ${ROOT} ]]; then
+			REMOTE_DIR="${SUBDIR}"
+		else
+			REMOTE_DIR="${ROOT}/${SUBDIR}"
+		fi
+		#shellcheck disable=SC2086
+		"${ALLSKY_SCRIPTS}/upload.sh" ${ARGS} --remote "web" \
+			"${UPLOAD_FILE}" "${REMOTE_DIR}" "${DESTINATION_NAME}" "${FILE_TYPE}"
+		((RET+=$?))
+	fi
+	if [[ ${REMOTE_SERVER} == "true" && "$( settings ".useremoteserver" )" == "true" ]]; then
+		ROOT="$( settings ".remoteserverimagedir" )"
+		if [[ -z ${ROOT} ]]; then
+			REMOTE_DIR="${SUBDIR}"
+		else
+			REMOTE_DIR="${ROOT}/${SUBDIR}"
+		fi
+		#shellcheck disable=SC2086
+		"${ALLSKY_SCRIPTS}/upload.sh" ${ARGS} --remote "server" \
+			"${UPLOAD_FILE}" "${REMOTE_DIR}" "${DESTINATION_NAME}" "${FILE_TYPE}"
+		((RET+=$?))
+	fi
+
+	return "${RET}"
 }
 
 
@@ -820,9 +856,14 @@ function indent()
 	echo -e "${1}" | sed 's/^/\t/'
 }
 
+
 # Python virtual environment
 PYTHON_VENV_ACTIVATED="false"
 activate_python_venv() {
+
+# TODO: will need to change when the OS after bookworm is released
+# If our next release is out, it won't support buster so may be check  != bullseye  ?
+
 	if [[ ${PI_OS} == "bookworm" ]]; then
 		#shellcheck disable=SC1090,SC1091
 		source "${ALLSKY_PYTHON_VENV}/bin/activate" || exit 1
@@ -834,4 +875,21 @@ activate_python_venv() {
 
 deactivate_python_venv() {
 	[[ ${PYTHON_VENV_ACTIVATED} == "true" ]] && deactivate
+}
+
+
+# Determine if the specified value is a number.
+function is_number()
+{
+	local VALUE="${1}"
+	[[ -z ${VALUE} ]] && return 1
+	shopt -s extglob
+	local NON_NUMERIC="${VALUE/?([-+])*([0-9])?(.)*([0-9])/}"
+	if [[ -z ${NON_NUMERIC} ]]; then
+		# Nothing but +, -, 0-9, .
+		return 0
+	else
+		# Has non-numeric character
+		return 1
+	fi
 }

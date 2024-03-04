@@ -26,11 +26,13 @@
 
 // NOT_SET are items that aren't set yet and will be calculated at run time.
 // NOT_CHANGED items are command-line arguments where the default is camera-dependent,
+// NO_DEFAULT items don't have a default value.
 // and we can't use NOT_SET because -1 may be a legal value.
 // IS_DEFAULT means the value is the same as the camera default, so don't pass to camera program
 // since it'll use the default anyway.
 #define NOT_SET						-1
 #define NOT_CHANGED					-999999
+#define NO_DEFAULT					-999998
 #define	IS_DEFAULT					NOT_CHANGED
 
 // Defaults
@@ -91,6 +93,13 @@ enum cameraType {
 	ctRPi
 };
 
+enum ZWOexposure {
+	ZWOsnap,		// snapshot mode
+	ZWOvideoOff,	// video mode with video off between shots
+	ZWOvideo,		// video mode with video on all the time (original method)
+	ZWOend
+};
+
 // Use long instead of int so we can use validateLong() without creating validateInt().
 struct overlay {
 	char const *ImgText					= "";
@@ -114,7 +123,6 @@ struct overlay {
 	bool showExposure					= false;
 	bool showTemp						= false;
 	bool showGain						= false;
-	bool showBrightness					= false;
 	bool showMean						= false;
 	bool showFocus						= false;
 	bool showHistogramBox				= false;
@@ -127,7 +135,6 @@ struct overlay {
 // Histogram Box, ZWO only
 struct HB {
 	bool useHistogram					= false;		// Should we use histogram auto-exposure?
-	bool useExperimentalExposure		= false;		// Should histogram auto-exposure at night?
 	int histogramBoxSizeX				= 500;			// width of box in pixels
 	int currentHistogramBoxSizeX		= NOT_CHANGED;
 	int histogramBoxSizeY				= 500;			// height of box in pixels
@@ -210,14 +217,17 @@ struct config {			// for configuration variables
 	bool saveCC							= false;		// Save camera controls file?
 	bool tty							= false;		// Running on a tty?
 	bool preview						= false;		// Display a preview windoe?
-	bool daytimeCapture					= false;		// Capture images during daytime?
-	bool daytimeSave					= false;		// Save images during daytime?
 	char const *timeFormat				= "%Y%m%d %H:%M:%S";
 	char const *extraArgs				= "";			// Optional extra arguments passed on
+	bool determineFocus					= false;
 
 	// To make the code cleaner, comments are only given for daytime variables.
 
 	// Settings not camera-dependent.
+	bool daytimeCapture					= true;			// Capture images during daytime?
+	bool daytimeSave					= false;		// Save images during daytime?
+	bool nighttimeCapture				= true;
+	bool nighttimeSave					= true;
 	long dayDelay_ms					= 10 * MS_IN_SEC;	// Delay between capture end and start
 	long nightDelay_ms					= 10 * MS_IN_SEC;
 	long minDelay_ms					= NOT_SET;			// Minimum delay between images
@@ -250,8 +260,6 @@ struct config {			// for configuration variables
 	long nightExposure_us				= 20 * US_IN_SEC;
 	double temp_nightExposure_ms		= nightExposure_us / US_IN_MS;
 
-	long dayBrightness					= NOT_CHANGED;		// Brightness requested by user
-	long nightBrightness				= NOT_CHANGED;
 	bool dayAutoGain					= true;				// Use auto-gain?
 	bool nightAutoGain					= true;
 	double dayMaxAutoGain				= NOT_CHANGED;		// Max gain in auto-gain mode
@@ -274,7 +282,6 @@ struct config {			// for configuration variables
 	double contrast						= NOT_CHANGED;
 	double sharpness					= NOT_CHANGED;
 	long gamma							= NOT_CHANGED;
-	long offset							= NOT_CHANGED;
 	bool asiAutoBandwidth				= true;
 	long asiBandwidth					= NOT_CHANGED;
 	char const *fileName				= "image.jpg";		// value user specified
@@ -295,8 +302,9 @@ struct config {			// for configuration variables
 	char const *locale					= NULL;
 	long debugLevel						= 1;
 	bool consistentDelays				= true;
-	bool videoOffBetweenImages			= true;
 	char const *ASIversion				= "UNKNOWN";		// calculated value
+	bool videoOffBetweenImages			= true;
+	ZWOexposure ZWOexposureType			= ZWOsnap;
 
 	struct overlay overlay;
 	struct myModeMeanSetting myModeMeanSetting;
@@ -313,14 +321,12 @@ struct config {			// for configuration variables
 	double defaultSaturation			= NOT_SET;
 	double defaultContrast				= NOT_SET;
 	double defaultSharpness				= NOT_SET;
-	long defaultBrightness				= NOT_SET;
 	int defaultQuality					= NOT_SET;
 
 	// Current values - may vary between day and night
 	bool currentAutoExposure;
 	long currentMaxAutoExposure_us;
 	long currentExposure_us;
-	long currentBrightness;
 	int currentDelay_ms;
 	bool currentAutoGain;
 	double currentMaxAutoGain;
@@ -342,7 +348,6 @@ struct config {			// for configuration variables
 	long lastFocusMetric				= NOT_SET;
 	long lastAsiBandwidth				= NOT_SET;
 	double lastMean						= NOT_SET;
-	double lastMeanFull					= NOT_SET;
 	bool goodLastExposure				= false;		// Was the last image propery exposed?
 };
 
@@ -366,7 +371,7 @@ std::string exec(const char *);
 void add_variables_to_command(config, char *, timeval);
 bool checkForValidExtension(config *);
 std::string calculateDayOrNight(const char *, const char *, float);
-int calculateTimeToNightTime(const char *, const char *, float);
+int calculateTimeToNextTime(const char *, const char *, float, bool);
 void Log(int, const char *, ...);
 char const *c(char const *);
 void closeUp(int);
@@ -379,15 +384,18 @@ char const *getFlip(int);
 void closeUp(int);
 void IntHandle(int);
 int stopVideoCapture(int);
+int stopExposure(int);
+int closeCamera(int);
 bool validateLong(long *, long, long, char const *, bool);
 bool validateFloat(double *, double, double, char const *, bool);
 void displayHeader(config);
 void displayHelp(config);
 void displaySettings(config);
 char *LorF(double, char const *, char const *);
-bool daytimeSleep(bool, config);
+bool day_night_timeSleep(bool, config, bool);
 void delayBetweenImages(config, long, std::string);
 bool getCommandLineArguments(config *, int, char *[]);
 int displayNotificationImage(char const *);
 bool validateLatitudeLongitude(config *);
 void doLocale(config *);
+char const *getZWOexposureType(ZWOexposure);

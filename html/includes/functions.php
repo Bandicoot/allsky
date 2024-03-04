@@ -7,47 +7,59 @@
  *
 */
 
-// Sets all the define() variables.
+// This file sets all the define() variables.
 $defs = 'allskyDefines.inc';
 if ((include $defs) == false) {
-	echo "<div style='font-size: 200%;'>";
-	echo "<p style='color: red'>";
+	echo "<br><div class='errorMsgBig errorMsgBox'>";
 	echo "The installation of the WebUI is incomplete.<br>";
 	echo "File '$defs' not found.<br>";
-	echo "Please run the following from the 'allsky' directory:";
-	echo "</p>";
-	echo "<code>   ./install.sh --function create_webui_defines</code>";
+	echo "Please run the following to fix:";
+	echo "<br><br>";
+	echo "<code>   cd ~/allsky; ./install.sh --function create_webui_defines</code>";
 	echo "</div>";
-	exit;
+	exit(1);
 }
 
 // Read and decode a json file, returning the decoded results or null.
-// On error, display the specified error message
+// On error, display the specified error message.
+// If we're being run by the user it's likely on a tty so don't use html.
 function get_decoded_json_file($file, $associative, $errorMsg, &$returnedMsg=null) {
-	if (! file_exists($file)) {
-		$retMsg  = "<div style='color: red; font-size: 200%;'>";
-		$retMsg .= "$errorMsg";
-		$retMsg .= "<br>File '$file' missing!";
-		$retMsg .= "</div>";
+	$retMsg = "";
+	$html = (get_current_user() == WEBSERVER_OWNER);
+	if ($html) {
+		$div = "<div class='errorMsgBig'>";
+		$end = "</div>";
+		$br = "<br>";
+		$sep = "<br>";
+	} else {
+		$div = "";
+		$end = "\n";
+		$br = "\n";
+		$sep = "\n";
+	}
+
+	if ($file == "" || ! file_exists($file)) {
+		$retMsg .= $div;
+		$retMsg .= $errorMsg;
+		if ($file == "")
+			$retMsg .= " File not specified!";
+		else
+			$retMsg .= " File <b>$file</b> not found!";
+		$retMsg .= $end;
 		if ($returnedMsg === null) echo "$retMsg";
 		else $returnedMsg = $retMsg;
 		return null;
 	}
 
 	$str = file_get_contents($file, true);
-	if ($str === "") {
-		$retMsg  = "<div style='color: red; font-size: 200%;'>";
-		$retMsg .= "$errorMsg";
-		$retMsg .= "<br>File '$file' is empty!";
-		$retMsg .= "</div>";
-		if ($returnedMsg === null) echo "$retMsg";
-		else $returnedMsg = $retMsg;
-		return null;
-	} else if ($str === false) {
-		$retMsg  = "<div style='color: red; font-size: 200%;'>";
-		$retMsg .= "$errorMsg:";
-		$retMsg .= "<br>Error reading '$file'!";
-		$retMsg .= "</div>";
+	if ($str === "" || $str === false) {
+		$retMsg .= $div;
+		$retMsg .= $errorMsg;
+		if ($str === "")
+			$retMsg .= " File <b>$file</b> is empty!";
+		else
+			$retMsg .= " Error reading <b>$file</b>!";
+		$retMsg .= $end;
 		if ($returnedMsg === null) echo "$retMsg";
 		else $returnedMsg = $retMsg;
 		return null;
@@ -55,13 +67,14 @@ function get_decoded_json_file($file, $associative, $errorMsg, &$returnedMsg=nul
 
 	$str_array = json_decode($str, $associative);
 	if ($str_array == null) {
-		$retMsg  = "<div style='color: red; font-size: 200%;'>";
-		$retMsg .= "$errorMsg";
-		$retMsg .= "<br>" . json_last_error_msg();
+		$retMsg .= $div;
+		$retMsg .= "$errorMsg ";
+		$retMsg .= json_last_error_msg();
 		$cmd = "json_pp < $file 2>&1";
 		exec($cmd, $output);
-		$retMsg .= "<br>" . implode("<br>", $output);
-		$retMsg .= "</div>";
+		$retMsg .= $br;
+		$retMsg .= implode($sep, $output);
+		$retMsg .= $end;
 		if ($returnedMsg === null) echo "$retMsg";
 		else $returnedMsg = $retMsg;
 		return null;
@@ -69,132 +82,167 @@ function get_decoded_json_file($file, $associative, $errorMsg, &$returnedMsg=nul
 	return $str_array;
 }
 
-$image_name=null; $delay=null; $daydelay=null; $nightdelay=null; $darkframe=null; $useLogin=null;
+// The opposite of toString().  Given a string version of a boolean, return true or false.
+function toBool($s) {
+	if ($s == "true" || $s == "Yes" || $s == "yes" || $s == "1")
+		return true;
+	return false;
+}
+
+function verifyNumber($num) {
+	if ($num == "" || ! is_numeric($num)) {
+		return false;
+	}
+	return true;
+}
+
+// Globals
+$image_name = null;
+$showUpdatedMessage = true; $delay=null; $daydelay=null; $nightdelay=null;
+$imagesSortOrder = null;
+$darkframe = null;
+$useLogin = null;
 $temptype = null;
 $lastChanged = null;
-$websiteURL = null;
-function initialize_variables() {
-	global $status, $needToDisplayMessages;
-	global $image_name, $delay, $daydelay, $nightdelay;
-	global $darkframe, $useLogin, $temptype, $lastChanged, $lastChangedName;
-	global $websiteURL;
+$remoteWebsiteURL = null;
+$settings_array = null;
+$useLocalWebsite = null;
+$useRemoteWebsite = null;
+$hasLocalWebsite = null;
+$hasRemoteWebsite = null;
+$endSetting = "XX_END_XX";
 
-	// The Camera Type should be set during the installation, so this "should" never fail...
-	$cam_type = getCameraType();
-	if ($cam_type == '') {
-		echo "<div style='color: red; font-size: 200%;'>";
-		echo "'Camera Type' not defined in config.sh.  Please update it.";
-		echo "</div>";
-		exit;
-	}
+function initialize_variables($website_only=false) {
+	global $status;
+	global $image_name;
+	global $showUpdatedMessage, $delay, $daydelay, $nightdelay;
+	global $imagesSortOrder;
+	global $darkframe, $useLogin, $temptype, $lastChanged, $lastChangedName;
+	global $remoteWebsiteURL;
+	global $settings_array;
+	global $useLocalWebsite, $useRemoteWebsite;
+	global $hasLocalWebsite, $hasRemoteWebsite;
 
 	$settings_file = getSettingsFile();
 	$errorMsg = "ERROR: Unable to process settings file '$settings_file'.";
 	$settings_array = get_decoded_json_file($settings_file, true, $errorMsg);
 	if ($settings_array === null) {
-		exit;
+		exit(1);
 	}
+
+	// See if there are any website configuration files.
+	// Assume if there are, that website is in use.
+	if (file_exists(getLocalWebsiteConfigFile())) {
+		$hasLocalWebsite = true;
+	} else {
+		$hasLocalWebsite = false;
+	}
+	if (file_exists(getRemoteWebsiteConfigFile())) {
+		$hasRemoteWebsite = true;
+	} else {
+		$hasRemoteWebsite = false;
+	}
+	$useLocalWebsite = toBool(getVariableOrDefault($settings_array, 'uselocalwebsite', "false"));
+	$useRemoteWebsite = toBool(getVariableOrDefault($settings_array, 'useremotewebsite', "false"));
+
+	if ($website_only) return;
 
 	// $img_dir is an alias in the web server's config that points to where the current image is.
 	// It's the same as ${ALLSKY_TMP} which is the physical path name on the server.
-	$img_dir = get_variable(ALLSKY_CONFIG . '/config.sh', 'IMG_DIR=', 'current/tmp');
-	$image_name = $img_dir . "/" . $settings_array['filename'];
-	$darkframe = $settings_array['takeDarkFrames'];
-	$useLogin = getVariableOrDefault($settings_array, 'useLogin', true);
+	$img_dir = get_variable(ALLSKY_HOME . '/variables.sh', 'IMG_DIR=', 'current/tmp');
+	$f = getVariableOrDefault($settings_array, 'filename', "image.jpg");
+	$image_name = "$img_dir/$f";
+	$darkframe = toBool(getVariableOrDefault($settings_array, 'takedarkframes', "false"));
+	$imagesSortOrder = getVariableOrDefault($settings_array, 'imagessortorder', "ascending");
+	$useLogin = toBool(getVariableOrDefault($settings_array, 'uselogin', "true"));
 	$temptype = getVariableOrDefault($settings_array, 'temptype', "C");
 	$lastChanged = getVariableOrDefault($settings_array, $lastChangedName, "");
-	$websiteURL = getVariableOrDefault($settings_array, 'websiteurl', "");
+	$remoteWebsiteURL = getVariableOrDefault($settings_array, 'remotewebsiteurl', "");
 
 
 	////////////////// Determine delay between refreshes of the image.
-	$consistentDelays = $settings_array["consistentDelays"] == 1 ? true : false;
-	$daydelay = $settings_array["daydelay"];
-	$daymaxautoexposure = $settings_array["daymaxautoexposure"];
-	$dayexposure = $settings_array["dayexposure"];
-	$nightdelay = $settings_array["nightdelay"];
-	$nightmaxautoexposure = $settings_array["nightmaxautoexposure"];
-	$nightexposure = $settings_array["nightexposure"];
+	$daydelay = getVariableOrDefault($settings_array, 'daydelay', 30000);
+	$nightdelay = getVariableOrDefault($settings_array, 'nightdelay', 30000);
+	$showUpdatedMessage = toBool(getVariableOrDefault($settings_array, 'showupdatedmessage', "true"));
+
+	$daymaxautoexposure = getVariableOrDefault($settings_array, 'daymaxautoexposure', 100);
+	$dayexposure = getVariableOrDefault($settings_array, 'dayexposure', 500);
+	$nightmaxautoexposure = getVariableOrDefault($settings_array, 'nightmaxautoexposure', 10000);
+	$nightexposure = getVariableOrDefault($settings_array, 'nightexposure', 10000);
+	$consistentDelays = toBool(getVariableOrDefault($settings_array, 'consistentdelays', "true"));
 
 	$ok = true;
-	if (! is_numeric($daydelay)) {
-		$ok = false;
-		$status->addMessage("<strong>daydelay</strong> is not a number.", 'danger', false);
-	}
-	if (! is_numeric($daymaxautoexposure)) {
-		$ok = false;
-		$status->addMessage("<strong>daymaxautoexposure</strong> is not a number.", 'danger', false);
-	}
-	if (! is_numeric($dayexposure)) {
-		$ok = false;
-		$status->addMessage("<strong>dayexposure</strong> is not a number.", 'danger', false);
-	}
-	if (! is_numeric($nightdelay)) {
-		$ok = false;
-		$status->addMessage("<strong>nightdelay</strong> is not a number.", 'danger', false);
-	}
-	if (! is_numeric($nightmaxautoexposure)) {
-		$ok = false;
-		$status->addMessage("<strong>nightmaxautoexposure</strong> is not a number.", 'danger', false);
-	}
-	if (! is_numeric($nightexposure)) {
-		$ok = false;
-		$status->addMessage("<strong>nightexposure</strong> is not a number.", 'danger', false);
-	}
-	if ($ok) {
-		$daydelay += ($consistentDelays ? $daymaxautoexposure : $dayexposure);
-		$nightdelay += ($consistentDelays ? $nightmaxautoexposure : $nightexposure);
+	// These are all required settings so if they are blank don't display a
+	// message since the WebUI will.
+	$delay = 0;
+	if (! verifyNumber($daydelay)) $ok = false; else $delay += $daydelay;
+	if (! verifyNumber($daymaxautoexposure)) $ok = false;
+	if (! verifyNumber($dayexposure)) $ok = false;
+	if (! verifyNumber($nightdelay)) $ok = false; else $delay += $nightdelay;
+	if (! verifyNumber($nightmaxautoexposure)) $ok = false;
+	if (! verifyNumber($nightexposure)) $ok = false;
 
-		$showDelay = getVariableOrDefault($settings_array, 'showDelay', true);
-		if ($showDelay) {
-			// Determine if it's day or night so we know which delay to use.
-			$angle = $settings_array['angle'];
-			$lat = $settings_array['latitude'];
-			$lon = $settings_array['longitude'];
-			exec("sunwait poll exit set angle $angle $lat $lon", $return, $retval);
-			if ($retval == 2) {
-				$delay = $daydelay;
-			} else if ($retval == 3) {
-				$delay = $nightdelay;
-			} else {
-				$msg = "<code>sunwait</code> returned $retval; don't know if it's day or night.";
-				$status->addMessage($msg, 'danger', false);
-				$needToDisplayMessages = true;
-				$delay = ($daydelay + $nightdelay) / 2;		// Use the average delay
-			}
+	if (! $ok) {
+		$showUpdatedMessage = false;
+		if ($delay === 0) $delay = 20000;	// a reasonable default
+		return;
+	}
 
-			// Convert to seconds for display.
-			$daydelay /= 1000;
-			$nightdelay /= 1000;
+	$daydelay += ($consistentDelays ? $daymaxautoexposure : $dayexposure);
+	$nightdelay += ($consistentDelays ? $nightmaxautoexposure : $nightexposure);
+
+	// Determine if it's day or night so we know which delay to use.
+	$angle = getVariableOrDefault($settings_array, 'angle', -6);
+	$lat = getVariableOrDefault($settings_array, 'latitude', "");
+	$lon = getVariableOrDefault($settings_array, 'longitude', "");
+	if ($lat != "" && $lon != "") {
+		exec("sunwait poll exit set angle $angle $lat $lon", $return, $retval);
+		if ($retval == 2) {
+			$delay = $daydelay;
+		} else if ($retval == 3) {
+			$delay = $nightdelay;
 		} else {
-			// Not showing delay so just use average
+			$msg = "<code>sunwait</code> returned $retval; don't know if it's day or night.";
+			$status->addMessage($msg, 'danger');
 			$delay = ($daydelay + $nightdelay) / 2;		// Use the average delay
-			$daydelay = -1;		// signifies it's not being used
 		}
-		// Lessen the delay between a new picture and when we check.
-		$delay /= 4;
+
+		// Convert to seconds for display.
+		$daydelay /= 1000;
+		$nightdelay /= 1000;
 	} else {
-		$daydelay = -1;
-		$needToDisplayMessages = true;
+		// Error message will be displayed by WebUI.
+		$showUpdatedMessage = false;
+		// Not showing delay so just use average
+		$delay = ($daydelay + $nightdelay) / 2;		// Use the average delay
 	}
+
+	// Lessen the delay between a new picture and when we check.
+	$delay /= 5;
+	if ($delay < 2) $delay = 2;
 }
 
 // Check if the settings have been configured.
 function check_if_configured($page, $calledFrom) {
-	global $lastChanged, $status, $needToDisplayMessages;
+	global $lastChanged, $status;
+	static $will_display_configured_message = false;
 
-	// The conf page calls us if needed.
-	if ($calledFrom === "main" && $page === "configuration")
-		return;
+	if ($will_display_configured_message)
+		return(true);
 
 	if ($lastChanged === "") {
 		// The settings aren't configured - probably right after an installation.
+		$msg = "Allsky must be configured before using it.<br>";
 		if ($page === "configuration")
-			$m = "";
+			$msg .= "If it's already configured, just click on the 'Save changes' button.";
 		else
-			$m = "<br>Go to the 'Allsky Settings' page.";
-		$status->addMessage("You must configure Allsky before using it.<br>If it's already configured, just click on the 'Save changes' button.$m", 'danger', false);
-		$needToDisplayMessage = true;
+			$msg .= "Go to the 'Allsky Settings' page to do so.";
+		$status->addMessage("<div class='important'>$msg</div>", 'danger');
+		$will_display_configured_message = true;
+		return(false);
 	}
+
+	return(true);
 }
 /**
 *
@@ -389,7 +437,7 @@ function parse_ifconfig($input, &$strHWAddress, &$strIPAddress, &$strNetMask, &$
 	}
 }
 
-function handle_interface_POST_and_status($interface, $input, &$status) {
+function handle_interface_POST_and_status($interface, $input, &$myStatus) {
 	$interface_up = false;
 	if( isset($_POST['turn_down']) ) {
 		// We should only get here if the interface is up,
@@ -397,19 +445,19 @@ function handle_interface_POST_and_status($interface, $input, &$status) {
 		// If the interface is down it's also not running.
 		$s = get_interface_status("ifconfig $interface");
 		if (! is_interface_up($s)) {
-			$status->addMessage("Interface $interface was already down", 'warning');
+			$myStatus->addMessage("Interface $interface was already down", 'warning', false);
 		} else {
 			exec( "sudo ifconfig $interface down 2>&1", $output );	// stop
 			// Check that it actually stopped
 			$s = get_interface_status("ifconfig $interface");
 			if (! is_interface_up($s)) {
-				$status->addMessage("Interface $interface stopped", 'success');
+				$myStatus->addMessage("Interface $interface stopped", 'success', false);
 			} else {
 				if ($output == "")
 					$output = "Unknown reason";
 				else
 					$output = implode(" ", $output);
-				$status->addMessage("Unable to stop interface $interface<br>$output" , 'danger');
+				$myStatus->addMessage("Unable to stop interface $interface<br>$output" , 'danger', false);
 				$interface_up = true;
 			}
 		}
@@ -418,19 +466,19 @@ function handle_interface_POST_and_status($interface, $input, &$status) {
 		// We should only get here if the interface is down,
 		// but just in case, check if it's already up.
 		if (is_interface_up(get_interface_status("ifconfig $interface"))) {
-			$status->addMessage("Interface $interface was already up", 'warning');
+			$myStatus->addMessage("Interface $interface was already up", 'warning', false);
 			$interface_up = true;
 		} else {
 			exec( "sudo ifconfig $interface up 2>&1", $output );	// start
 			// Check that it actually started
 			$s = get_interface_status("ifconfig $interface");
 			if (! is_interface_up($s)) {
-				$status->addMessage("Unable to start interface $interface", 'danger');
+				$myStatus->addMessage("Unable to start interface $interface", 'danger', false);
 			} else {
 				if (is_interface_running($s))
-					$status->addMessage("Interface $interface started", 'success');
+					$myStatus->addMessage("Interface $interface started", 'success', false);
 				else
-					$status->addMessage("Interface $interface started but nothing connected to it", 'warning');
+					$myStatus->addMessage("Interface $interface started but nothing connected to it", 'warning', false);
 				$interface_up = true;
 			}
 		}
@@ -438,13 +486,13 @@ function handle_interface_POST_and_status($interface, $input, &$status) {
 	} elseif (is_interface_up($input)) {
 		// The interface can be up but nothing connected to it (i.e., not RUNNING).
 		if (is_interface_running($input))
-			$status->addMessage("Interface $interface is up", 'success');
+			$myStatus->addMessage("Interface $interface is up", 'success', false);
 		else
-			$status->addMessage("Interface $interface is up but nothing connected to it", 'warning');
+			$myStatus->addMessage("Interface $interface is up but nothing connected to it", 'warning', false);
 		$interface_up = true;
 
 	} else {
-		$status->addMessage("Interface $interface is down", 'danger');
+		$myStatus->addMessage("Interface $interface is down", 'danger', false);
 	}
 
 	return($interface_up);
@@ -458,14 +506,19 @@ function handle_interface_POST_and_status($interface, $input, &$status) {
 * so there shouldn't be a comment on the line,
 * however, there can be optional spaces or tabs before the string.
 *
-* This function will go away once the config.sh and ftp-settings.sh files are merged
-* into the settings.json file.
 */
 function get_variable($file, $searchfor, $default)
 {
 	// get the file contents
+	if (! file_exists($file)) {
+		$msg  = "<div class='error-msg'>";
+		$msg .= "<br>File '$file' not found!";
+		$msg .= "</div>";
+		echo $msg;
+		return($default);
+	}
 	$contents = file_get_contents($file);
-	if ("$contents" == "") return($default);	// file not found or not readable
+	if ($contents == "") return($default);	// file not found or not readable
 
 	// escape special characters in the query
 	$pattern = preg_quote($searchfor, '/');
@@ -501,8 +554,9 @@ function get_variable($file, $searchfor, $default)
 /**
 * 
 * List a type of file - either "All" (case sensitive) for all days, or only for the specified day.
+* If $dir is not null, it ends in "/".
 */
-function ListFileType($dir, $imageFileName, $formalImageTypeName, $type) {	// if $dir is not null, it ends in "/"
+function ListFileType($dir, $imageFileName, $formalImageTypeName, $type) {
 	$num = 0;	// Let the user know when there are no images for the specified day
 	// "/images" is an alias in the web server for ALLSKY_IMAGES
 	$images_dir = "/images";
@@ -537,16 +591,16 @@ function ListFileType($dir, $imageFileName, $formalImageTypeName, $type) {	// if
 						$fullFilename = "$images_dir/$day/$dir$imageType_name";
 						if ($type == "picture") {
 							echo "<a href='$fullFilename'>";
-							echo "<div style='float: left; width: 100%; margin-bottom: 2px;'>";
+							echo "<div class='functionsListFileType'>";
 							echo "<label>$day</label>";
-							echo "<img src='$fullFilename' style='margin-left: 10px; max-width: 50%; max-height:100px'/>";
+							echo "<img src='$fullFilename' class='functionsListTypeImg' />";
 							echo "</div></a>\n";
 						} else {	// is video
-							// xxxx TODO: Show a thumbnail since loading all the videos is bandwidth intensive.
+							// TODO: Show a thumbnail since loading videos is bandwidth intensive.
 							echo "<a href='$fullFilename'>";
-							echo "<div style='float: left; width: 100%; margin-bottom: 2px;'>";
-							echo "<label style='vertical-align: middle'>$day &nbsp; &nbsp;</label>";
-							echo "<video width='85%' height='85%' controls style='vertical-align: middle'>";
+							echo "<div class='functionsListFileType'>";
+							echo "<label class='middleVerticalAlign'>$day &nbsp; &nbsp;</label>";
+							echo "<video width='85%' height='85%' controls class='middleVerticalAlign'>";
 							echo "<source src='$fullFilename' type='video/mp4'>";
 							echo "Your browser does not support the video tag.";
 							echo "</video>";
@@ -572,12 +626,12 @@ function ListFileType($dir, $imageFileName, $formalImageTypeName, $type) {	// if
 				$fullFilename = "$images_dir/$chosen_day/$dir$imageType_name";
 				if ($type == "picture") {
 				    echo "<a href='$fullFilename'>
-					<div style='float: left'>
-					<img src='$fullFilename' style='max-width: 100%;max-height:400px'/>
+					<div class='left'>
+					<img src='$fullFilename' style='max-width: 100%; max-height: 400px'/>
 					</div></a>\n";
 				} else {	//video
 				    echo "<a href='$fullFilename'>";
-				    echo "<div style='float: left; width: 100%'>
+				    echo "<div class='left' style='width: 100%'>
 					<video width='85%' height='85%' controls>
 						<source src='$fullFilename' type='video/mp4'>
 						Your browser does not support the video tag.
@@ -601,7 +655,7 @@ function runCommand($cmd, $message, $messageColor, $addMsg=true)
 		// This is only a warning so only display the caller's message, if any.
 		if ($result != null) $msg = implode("<br>", $result);
 		else $msg = "";
-		$status->addMessage($msg, "warning", true);
+		$status->addMessage($msg, "warning", false);
 		return false;
 	} elseif ($return_val > 0) {
 		// Display a failure message, plus the caller's message, if any.
@@ -612,16 +666,16 @@ function runCommand($cmd, $message, $messageColor, $addMsg=true)
 			if ($result != null) $msg = implode("<br>", $result);
 			else $msg = "";
 		}
-		$status->addMessage($msg, "danger", true);
+		$status->addMessage($msg, "danger", false);
 		return false;
 	}
 
 	// Display the caller's "on success" message, if any.
 	if ($message !== "")
-		$status->addMessage($message, $messageColor, true);
+		$status->addMessage($message, $messageColor, false);
 
 	// Display any output from the command.
-	if ($result != null) $status->addMessage(implode("<br>", $result), "message", true);
+	if ($result != null) $status->addMessage(implode("<br>", $result), "message", false);
 
 	return true;
 }
@@ -641,13 +695,16 @@ function updateFile($file, $contents, $fileName, $toConsole) {
 			$cl1 = "";
 			$cl2 = "";
 		}
-		echo $cl1 . "Unable to update $file 1st time: $e$cl2\n";
+		echo "${cl1}Unable to update $file 1st time: ${e}${cl2}\n";
 
 		// Assumed it failed due to lack of permissions,
 		// usually because the file isn't grouped to the web server group.
 		// Set the permissions and try again.
 
-		$err = str_replace("\n", "", shell_exec("x=\$(sudo chgrp " . WEBSERVER_GROUP . " '$file' 2>&1 && sudo chmod g+w '$file') || echo \${x}"));
+		$cmd = "x=\$(sudo touch '$file';";
+		$cmd .= " sudo chgrp " . WEBSERVER_GROUP . " '$file' 2>&1 &&";
+		$cmd .= " && sudo chmod g+w '$file') || echo \${x}";
+		$err = str_replace("\n", "", $shell_exec($cmd));
 		if ($err != "") {
 			return "Unable to update settings: $err";
 		}
@@ -655,9 +712,9 @@ function updateFile($file, $contents, $fileName, $toConsole) {
 		if (@file_put_contents($file, $contents) == false) {
 			$e = error_get_last()['message'];
 			$err = "Failed to save settings: $e";
-			echo $cl1 . "Unable to update file for 2nd time: $e$cl2";
+			echo "${cl1}Unable to update file for 2nd time: ${e}${cl2}";
 			$x = str_replace("\n", "", shell_exec("ls -l '$file'"));
-			echo $cl1 . "ls -l returned: $x$cl2";
+			echo "${cl1}ls -l returned: ${x}${cl2}";
 
 			// Save a temporary copy of the file in a place the webserver can write to,
 			// then use sudo to "cp" the file to the final place.
@@ -670,26 +727,52 @@ function updateFile($file, $contents, $fileName, $toConsole) {
 				return $err;
 			}
 
-			$err = str_replace("\n", "", shell_exec("x=\$(sudo cp '$tempFile' '$file' 2>&1) || echo 'Unable to copy [$tempFile] to [$file]': \${x}"));
-			echo $cl1 . "cp returned: [$err]$cl2";
+			$cmd = "x=\$(sudo cp '$tempFile' '$file' 2>&1) || echo 'Unable to copy [$tempFile] to [$file]': \${x}";
+			$err = str_replace("\n", "", shell_exec($cmd));
+			echo "${cl1}cp returned: [$err]${cl2}";
 			return $err;
 		}
 	}
 	return "";
 }
 
-function getCameraType() {
-	return get_variable(ALLSKY_CONFIG . '/config.sh', 'CAMERA_TYPE=', '');
-}
-
-// Return the settings file for the specified camera.
+// Return the settings file for the current camera.
 function getSettingsFile() {
 	return ALLSKY_CONFIG . "/settings.json";
 }
 
-// Return the options file for the specified camera.
+// Return the options file for the current camera.
 function getOptionsFile() {
 	return ALLSKY_CONFIG . "/options.json";
+}
+
+// Return the full path name of the local Website configuration file.
+function getLocalWebsiteConfigFile() {
+	return ALLSKY_WEBSITE_LOCAL_CONFIG;
+}
+
+// Return the full path name of the remote Website configuration file.
+function getRemoteWebsiteConfigFile() {
+	return ALLSKY_WEBSITE_REMOTE_CONFIG;
+}
+
+// Return the file name after accounting for any ${} variables.
+// Since there will often only be one file used by multiple settings,
+// as an optimization save the last name.
+$lastFileName = null;
+function getFileName($file) {
+	global $lastFileName;
+
+	if ($lastFileName === $file) return $lastFileName;
+
+	if (strpos('${HOME}', $file) !== false) {
+		$lastFileName = str_replace('${HOME}', HOME, $file);
+	} else if (strpos('${ALLSKY_ENV}', $file) !== false) {
+		$lastFileName = str_replace('${ALLSKY_ENV}', ALLSKY_ENV, $file);
+	} else if (strpos('${ALLSKY_HOME}', $file) !== false) {
+		$lastFileName = str_replace('${ALLSKY_HOME}', ALLSKY_HOME, $lastFileName);
+	}
+	return $lastFileName;
 }
 
 // Check if the specified variable is in the specified array.
@@ -698,10 +781,16 @@ function getOptionsFile() {
 function getVariableOrDefault($a, $v, $d) {
 	if (isset($a[$v])) {
 		$value = $a[$v];
-		if (gettype($value) === "boolean" && $value == "") return 0;
+		if (gettype($value) === "boolean") {
+			if ($value || $value == "true") {
+				return "true";
+			} else {
+				return "false";
+			}
+		}
 		return $value;
 	} else if (gettype($d) === "boolean" && $d == "") {
-		return 0;
+		return "false";
 	} else if (gettype($d) === "null") {
 		return null;
 	}

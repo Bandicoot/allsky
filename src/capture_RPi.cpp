@@ -40,21 +40,23 @@ using namespace std;
 timeval exposureStartDateTime;						// date/time an image started
 
 std::vector<int> compressionParameters;
-bool bMain					= true;
-bool bDisplay				= false;
+bool bMain						= true;
+bool bDisplay					= false;
 std::string dayOrNight;
-int numErrors				= 0;					// Number of errors in a row
-int maxErrors				= 4;					// Max number of errors in a row before we exit
+int numTotalErrors				= 0;				// Total number of errors, fyi
+int numConsecutiveErrors		= 0;				// Number of consecutive errors
+int maxErrors					= 4;				// Max number of errors in a row before we exit
 
-bool gotSignal				= false;				// did we get a SIGINT (from keyboard), or SIGTERM/SIGHUP (from service)?
-int iNumOfCtrl				= NOT_SET;				// Number of camera control capabilities
-pthread_t threadDisplay		= 0;					// Not used by Rpi;
-int numExposures			= 0;					// how many valid pictures have we taken so far?
-int currentBpp				= NOT_SET;				// bytes per pixel: 8, 16, or 24
-int currentBitDepth			= NOT_SET;				// 8 or 16
+bool gotSignal					= false;			// Did we get signal?
+int iNumOfCtrl					= NOT_SET;			// Number of camera control capabilities
+pthread_t threadDisplay			= 0;				// Not used by Rpi;
+int numExposures				= 0;				// how many valid pictures have we taken so far?
+int currentBpp					= NOT_SET;			// bytes per pixel: 8, 16, or 24
+int currentBitDepth				= NOT_SET;			// 8 or 16
 raspistillSetting myRaspistillSetting;
 modeMeanSetting myModeMeanSetting;
 std::string errorOutput			= "/tmp/capture_RPi_debug.txt";
+
 
 //---------------------------------------------------------------------------------------------
 //---------------------------------------------------------------------------------------------
@@ -82,14 +84,6 @@ int RPicapture(config cg, cv::Mat *image)
 
 	ss << cg.fullFilename;
 	command += " --output '" + ss.str() + "'";
-
-	if (*cg.extraArgs)
-	{
-		// add the extra arguments as is; do not parse them
-		ss.str("");
-		ss << cg.extraArgs;
-		command += " " + ss.str();
-	}
 
 	if (cg.isLibcamera)
 	{
@@ -265,11 +259,10 @@ int RPicapture(config cg, cv::Mat *image)
 		if (! cg.isLibcamera)
 			command += " --awb off";		// raspistill requires explicitly turning off
 
-		if (cg.currentWBR != cg.defaultWBR || cg.currentWBB != cg.defaultWBB) {
-			ss.str("");
-			ss << cg.currentWBR << "," << cg.currentWBB;
-			command += " --awbgains " + ss.str();
-		}
+		// If we don't specify when they are the default then auto mode is enabled.
+		ss.str("");
+		ss << cg.currentWBR << "," << cg.currentWBB;
+		command += " --awbgains " + ss.str();
 	}
 
 	if (cg.rotation != cg.defaultRotation) {
@@ -303,20 +296,18 @@ int RPicapture(config cg, cv::Mat *image)
 		command += " --sharpness "+ ss.str();
 	}
 
-	if (cg.currentBrightness != cg.defaultBrightness) {
-		ss.str("");
-		if (cg.isLibcamera)
-			// User enters -100 to 100.  Convert to -1.0 to 1.0.
-			ss << (float) cg.currentBrightness / 100;
-		else
-			ss << cg.currentBrightness;
-		command += " --brightness " + ss.str();
-	}
-
 	if (cg.quality != cg.defaultQuality) {
 		ss.str("");
 		ss << cg.quality;
 		command += " --quality " + ss.str();
+	}
+
+	if (*cg.extraArgs)
+	{
+		// add the extra arguments as is; do not parse them
+		ss.str("");
+		ss << cg.extraArgs;
+		command += " " + ss.str();
 	}
 
 	// Log the command we're going to run without the
@@ -332,7 +323,7 @@ int RPicapture(config cg, cv::Mat *image)
 	{
 		// If there have been 2 consecutive errors, chances are this one will fail too,
 		// so capture the error message.
-		if (cg.debugLevel >= 3 || numErrors >= 2)
+		if (cg.debugLevel >= 3 || numConsecutiveErrors >= 2)
 			s2 = " > " + errorOutput + " 2>&1";
 		else
 			s2 = " 2> /dev/null";	// gets rid of a bunch of libcamera verbose messages
@@ -373,7 +364,7 @@ int RPicapture(config cg, cv::Mat *image)
 
 int main(int argc, char *argv[])
 {
-	CG.ME = argv[0];
+	CG.ME = basename(argv[0]);
 
 	static char *a = getenv("ALLSKY_HOME");		// This must come before anything else
 	if (a == NULL)
@@ -537,8 +528,9 @@ int main(int argc, char *argv[])
 	int originalITextY		= CG.overlay.iTextY;
 	int originalFontsize	= CG.overlay.fontsize;
 	int originalLinewidth	= CG.overlay.linewidth;
-	// Have we displayed "not taking picture during day" message, if applicable?
+	// Have we displayed "not taking picture during day/night" messages, if applicable?
 	bool displayedNoDaytimeMsg = false;
+	bool displayedNoNighttimeMsg = false;
 
 	// Start taking pictures
 
@@ -551,13 +543,12 @@ int main(int argc, char *argv[])
 		if (CG.takeDarkFrames)
 		{
 			// We're doing dark frames so turn off autoexposure and autogain, and use
-			// nightime gain, delay, exposure, and brightness to mimic a nightime shot.
+			// nightime gain, delay, and exposure to mimic a nightime shot.
 			CG.currentSkipFrames = 0;
 			CG.currentAutoExposure = false;
 			CG.nightAutoExposure = false;
 			CG.currentExposure_us = CG.nightMaxAutoExposure_us;
 			CG.currentMaxAutoExposure_us = CG.nightMaxAutoExposure_us;
-			CG.currentBrightness = CG.nightBrightness;
 			if (CG.isColorCamera)
 			{
 				CG.currentAutoAWB = false;
@@ -601,7 +592,8 @@ int main(int argc, char *argv[])
 
 			if (! CG.daytimeCapture)
 			{
-				displayedNoDaytimeMsg = daytimeSleep(displayedNoDaytimeMsg, CG);
+				// true == for daytime
+				displayedNoDaytimeMsg = day_night_timeSleep(displayedNoDaytimeMsg, CG, true);
 
 				// No need to do any of the code below so go back to the main loop.
 				continue;
@@ -615,7 +607,6 @@ int main(int argc, char *argv[])
 			CG.currentAutoExposure = CG.dayAutoExposure;
 			CG.currentExposure_us = CG.dayExposure_us;
 			CG.currentMaxAutoExposure_us = CG.dayMaxAutoExposure_us;
-			CG.currentBrightness = CG.dayBrightness;
 			if (CG.isColorCamera)
 			{
 				CG.currentAutoAWB = CG.dayAutoAWB;
@@ -649,6 +640,15 @@ int main(int argc, char *argv[])
 				justTransitioned = false;
 			}
 
+			if (! CG.nighttimeCapture)
+			{
+				// false == for nighttime
+				displayedNoNighttimeMsg = day_night_timeSleep(displayedNoNighttimeMsg, CG, false);
+
+				// No need to do any of the code below so go back to the main loop.
+				continue;
+			}
+
 			Log(1, "==========\n=== Starting nighttime capture ===\n==========\n");
 
 			// We only skip initial frames if we are starting in nighttime and using auto-exposure.
@@ -658,7 +658,6 @@ int main(int argc, char *argv[])
 			CG.currentAutoExposure = CG.nightAutoExposure;
 			CG.currentExposure_us = CG.nightExposure_us;
 			CG.currentMaxAutoExposure_us = CG.nightMaxAutoExposure_us;
-			CG.currentBrightness = CG.nightBrightness;
 			if (CG.isColorCamera)
 			{
 				CG.currentAutoAWB = CG.nightAutoAWB;
@@ -717,12 +716,17 @@ myModeMeanSetting.modeMean = CG.myModeMeanSetting.modeMean;
 			CG.overlay.fontsize		= originalFontsize / CG.currentBin;
 			CG.overlay.linewidth	= originalLinewidth / CG.currentBin;
 
-// TODO: if not the first time, should we free the old pRgb?
+			if (numExposures > 0)
+			{
+				// If not the first time, free the prior pRgb.
+				pRgb.release();
+			}
+
 			if (CG.imageType == IMG_RAW16)
 			{
 				pRgb.create(cv::Size(CG.width, CG.height), CV_16UC1);
 			}
-				else if (CG.imageType == IMG_RGB24)
+			else if (CG.imageType == IMG_RGB24)
 			{
 				pRgb.create(cv::Size(CG.width, CG.height), CV_8UC3);
 			}
@@ -766,14 +770,14 @@ myModeMeanSetting.modeMean = CG.myModeMeanSetting.modeMean;
 			if (retCode == 0)
 			{
 				numExposures++;
-				numErrors = 0;
+				numConsecutiveErrors = 0;
 
 				// We currently have no way to get the actual white balance values,
 				// so use what the user requested.
 				CG.lastWBR = CG.currentWBR;
 				CG.lastWBB = CG.currentWBB;
 
-				CG.lastFocusMetric = CG.overlay.showFocus ? (int)round(get_focus_metric(pRgb)) : -1;
+				CG.lastFocusMetric = CG.determineFocus ? (int)round(get_focus_metric(pRgb)) : -1;
 
 				// If takeDarkFrames is off, add overlay text to the image
 				if (! CG.takeDarkFrames)
@@ -789,7 +793,6 @@ myModeMeanSetting.modeMean = CG.myModeMeanSetting.modeMean;
 					}
 
 					CG.lastMean = aegCalcMean(pRgb, true);
-					CG.lastMeanFull = aegCalcMean(pRgb, false);
 					if (myModeMeanSetting.meanAuto != MEAN_AUTO_OFF)
 					{
 						// set myRaspistillSetting.shutter_us and myRaspistillSetting.analoggain
@@ -879,10 +882,11 @@ myModeMeanSetting.modeMean = CG.myModeMeanSetting.modeMean;
 						CG.ME, retCode, WEXITSTATUS(retCode));
 				}
 
-				numErrors++;
-				if (numErrors >= maxErrors)
+				numTotalErrors++;
+				numConsecutiveErrors++;
+				if (numConsecutiveErrors >= maxErrors)
 				{
-					Log(0, "*** %s: ERROR: maximum number of consecutive errors of %d reached; capture program stopped.\n", CG.ME, maxErrors);
+					Log(0, "*** %s: ERROR: maximum number of consecutive errors of %d reached; capture program stopped. Total errors=%'d.\n", CG.ME, maxErrors, numTotalErrors);
 					Log(0, "Make sure cable between camera and Pi is all the way in.\n");
 					Log(0, "Look in '%s' for details.\n", errorOutput.c_str());
 					closeUp(EXIT_ERROR_STOP);

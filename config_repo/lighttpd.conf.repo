@@ -4,8 +4,8 @@ server.document-root        = "XX_ALLSKY_WEBUI_XX"
 server.upload-dirs          = ( "/var/cache/lighttpd/uploads" )
 server.errorlog             = "/var/log/lighttpd/error.log"
 server.pid-file             = "/var/run/lighttpd.pid"
-#server.username             = "www-data"
-#server.groupname            = "www-data"
+server.username             = "XX_WEBSERVER_OWNER_XX"
+server.groupname            = "XX_WEBSERVER_GROUP_XX"
 server.port                 = 80
 server.tag                  = "Allsky"
 
@@ -23,6 +23,7 @@ alias.url		    += ("/images/" => "XX_ALLSKY_IMAGES_XX/")
 alias.url		    += ("/config/" => "XX_ALLSKY_CONFIG_XX/")
 alias.url		    += ("/website/" => "XX_ALLSKY_WEBSITE_XX/")
 alias.url		    += ("/documentation" => "XX_ALLSKY_DOCUMENTATION_XX/")
+alias.url		    += ("/overlayTemplates" => "XX_MY_OVERLAY_TEMPLATES_XX/")
 alias.url		    += ("/overlay" => "XX_ALLSKY_OVERLAY_XX/")
 
 $HTTP["url"] =~ "^/cgi-bin/" {
